@@ -5,11 +5,22 @@ import pyautogui
 import win32gui
 import win32con
 import time
+import logging
 from PIL import ImageGrab
 import keyboard
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel, 
                            QVBoxLayout, QWidget, QLineEdit, QHBoxLayout)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+
+# 配置日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class BattleThread(QThread):
     """战场自动化线程"""
@@ -27,12 +38,15 @@ class BattleThread(QThread):
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.5
         self.battle_count = 0
+        logger.debug("BattleThread初始化完成")
 
     def check_battle_time(self):
         """检查当前是否在战场开放时间内"""
         current_time = time.localtime()
         current_hour = current_time.tm_hour
         current_wday = current_time.tm_wday  # 0-6, 0是周一
+        
+        logger.debug(f"检查战场时间 - 当前时间：{current_hour}点，星期{current_wday + 1}")
         
         # 检查周六周日上午
         if current_wday in [5, 6] and current_hour < 10:  # 5是周六，6是周日
@@ -110,18 +124,37 @@ class BattleThread(QThread):
         try:
             # 1. 查找战场图标
             self.status_signal.emit("寻找战场图标...")
-            battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.8)
+            logger.debug("开始查找战场图标...")
+            try:
+                battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.8)
+                logger.debug(f"战场图标查找结果: {battle_icon}, 置信度: 0.8")
+                if not battle_icon:
+                    # 如果没找到，尝试降低置信度再试一次
+                    battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.6)
+                    logger.debug(f"降低置信度后战场图标查找结果: {battle_icon}, 置信度: 0.6")
+            except Exception as e:
+                logger.error(f"查找战场图标时发生错误: {str(e)}")
+                battle_icon = None
+            
             if battle_icon:
                 self.log_signal.emit("找到战场图标，点击进入...")
+                logger.debug(f"战场图标位置: x={battle_icon.left}, y={battle_icon.top}, width={battle_icon.width}, height={battle_icon.height}")
                 self.click_position(battle_icon.left + battle_icon.width/2, 
                                  battle_icon.top + battle_icon.height/2)
                 time.sleep(2)
                 
                 # 2. 查找并点击单人匹配按钮
                 self.status_signal.emit("查找单人匹配按钮...")
-                match_button = pyautogui.locateOnScreen('assets/match_button.png', confidence=0.8)
+                try:
+                    match_button = pyautogui.locateOnScreen('assets/match_button.png', confidence=0.8)
+                    logger.debug(f"匹配按钮查找结果: {match_button}, 置信度: 0.8")
+                except Exception as e:
+                    logger.error(f"查找匹配按钮时发生错误: {str(e)}")
+                    match_button = None
+                
                 if match_button:
                     self.log_signal.emit("找到单人匹配按钮，开始匹配...")
+                    logger.debug(f"匹配按钮位置: x={match_button.left}, y={match_button.top}")
                     self.click_position(match_button.left + match_button.width/2,
                                      match_button.top + match_button.height/2)
                     time.sleep(2)
@@ -133,13 +166,28 @@ class BattleThread(QThread):
                 self.status_signal.emit("等待匹配中...")
                 wait_match_time = time.time()
                 match_success = False
+                
                 while self.running:
                     # 检查是否在匹配中
-                    if pyautogui.locateOnScreen('assets/matching.png', confidence=0.8):
-                        if time.time() - wait_match_time > 300:  # 5分钟超时
+                    try:
+                        matching_icon = pyautogui.locateOnScreen('assets/matching.png', confidence=0.8)
+                        logger.debug(f"匹配中图标查找结果: {matching_icon}, 置信度: 0.8")
+                    except Exception as e:
+                        logger.error(f"查找匹配中图标时发生错误: {str(e)}")
+                        matching_icon = None
+                    
+                    if matching_icon:
+                        current_wait_time = time.time() - wait_match_time
+                        logger.debug(f"当前已等待匹配时间: {current_wait_time:.1f}秒")
+                        if current_wait_time > 300:  # 5分钟超时
                             self.log_signal.emit("匹配超时，重新开始...")
                             # 点击取消匹配按钮
-                            cancel_button = pyautogui.locateOnScreen('assets/cancel_match.png', confidence=0.8)
+                            try:
+                                cancel_button = pyautogui.locateOnScreen('assets/cancel_match.png', confidence=0.8)
+                                logger.debug(f"取消匹配按钮查找结果: {cancel_button}")
+                            except Exception as e:
+                                logger.error(f"查找取消匹配按钮时发生错误: {str(e)}")
+                                cancel_button = None
                             if cancel_button:
                                 self.click_position(cancel_button.left + cancel_button.width/2,
                                                  cancel_button.top + cancel_button.height/2)
@@ -151,20 +199,47 @@ class BattleThread(QThread):
                     # 如果匹配界面消失，说明可能进入了loading状态
                     if not match_success:
                         self.log_signal.emit("匹配成功，等待进入战场...")
+                        logger.debug("检测到匹配界面消失，进入loading等待状态")
                         match_success = True
-                        # 给loading界面足够的时间
+                        logger.debug("等待15秒让loading完成...")
                         time.sleep(15)  # 等待15秒让loading完成
+                        logger.debug("loading等待完成，开始检查战场状态")
                         
                     # 检查是否已进入战场（尝试多个特征图片）
-                    if (pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8) or 
-                        pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.8)):
+                    try:
+                        logger.debug("尝试识别战场内状态...")
+                        in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
+                        logger.debug(f"主要战场特征识别结果: {in_battle}, 置信度: 0.8")
+                        if not in_battle:
+                            # 如果没找到，尝试降低置信度
+                            in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
+                            logger.debug(f"降低置信度后主要战场特征识别结果: {in_battle}, 置信度: 0.6")
+                    except Exception as e:
+                        logger.error(f"识别主要战场特征时发生错误: {str(e)}")
+                        in_battle = None
+
+                    try:
+                        in_battle_alt = pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.8)
+                        logger.debug(f"备用战场特征识别结果: {in_battle_alt}, 置信度: 0.8")
+                        if not in_battle_alt:
+                            # 如果没找到，尝试降低置信度
+                            in_battle_alt = pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.6)
+                            logger.debug(f"降低置信度后备用战场特征识别结果: {in_battle_alt}, 置信度: 0.6")
+                    except Exception as e:
+                        logger.error(f"识别备用战场特征时发生错误: {str(e)}")
+                        in_battle_alt = None
+                    
+                    if in_battle or in_battle_alt:
                         self.log_signal.emit("已进入战场，开始自动战斗...")
+                        logger.debug("成功识别到战场状态，开始战斗")
                         self.press_skill_key()
                         break
                         
                     # 如果既没有匹配中的提示，也没有进入战场，且已经过了loading时间
-                    if match_success and time.time() - wait_match_time > 30:  # 给30秒的总缓冲时间
+                    current_total_time = time.time() - wait_match_time
+                    if match_success and current_total_time > 30:  # 给30秒的总缓冲时间
                         self.log_signal.emit("进入战场超时，重新开始...")
+                        logger.debug(f"进入战场超时，已等待总时间: {current_total_time:.1f}秒")
                         return
                         
                     time.sleep(1)
@@ -174,8 +249,19 @@ class BattleThread(QThread):
                 battle_start_time = time.time()
                 while self.running:
                     # 检查战斗是否结束
-                    if pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8):
+                    try:
+                        battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8)
+                        logger.debug(f"战斗结束检测结果: {battle_end}, 置信度: 0.8")
+                        if not battle_end:
+                            battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.6)
+                            logger.debug(f"降低置信度后战斗结束检测结果: {battle_end}, 置信度: 0.6")
+                    except Exception as e:
+                        logger.error(f"检测战斗结束时发生错误: {str(e)}")
+                        battle_end = None
+                    
+                    if battle_end:
                         self.log_signal.emit("战斗结束，处理结算...")
+                        logger.debug("检测到战斗结束，准备处理结算")
                         self.release_skill_key()
                         self.battle_count += 1
                         self.status_signal.emit(f"已完成 {self.battle_count} 场战斗")
@@ -185,14 +271,17 @@ class BattleThread(QThread):
                         break
                     
                     # 战斗超时保护（10分钟）
-                    if time.time() - battle_start_time > 600:
+                    current_battle_time = time.time() - battle_start_time
+                    if current_battle_time > 600:
                         self.log_signal.emit("战斗时间过长，可能出现异常，重新开始...")
+                        logger.debug(f"战斗超时，已进行时间: {current_battle_time:.1f}秒")
                         self.release_skill_key()
                         return
                         
                     time.sleep(1)
                     
         except Exception as e:
+            logger.exception("执行过程中发生异常")
             self.log_signal.emit(f"执行过程中出错: {str(e)}")
             self.release_skill_key()
 
