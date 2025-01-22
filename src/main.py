@@ -132,6 +132,7 @@ class BattleThread(QThread):
                 # 3. 等待匹配
                 self.status_signal.emit("等待匹配中...")
                 wait_match_time = time.time()
+                match_success = False
                 while self.running:
                     # 检查是否在匹配中
                     if pyautogui.locateOnScreen('assets/matching.png', confidence=0.8):
@@ -147,22 +148,32 @@ class BattleThread(QThread):
                         time.sleep(1)
                         continue
                         
-                    # 检查是否已进入战场
-                    if pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8):
+                    # 如果匹配界面消失，说明可能进入了loading状态
+                    if not match_success:
+                        self.log_signal.emit("匹配成功，等待进入战场...")
+                        match_success = True
+                        # 给loading界面足够的时间
+                        time.sleep(15)  # 等待15秒让loading完成
+                        
+                    # 检查是否已进入战场（尝试多个特征图片）
+                    if (pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8) or 
+                        pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.8)):
                         self.log_signal.emit("已进入战场，开始自动战斗...")
                         self.press_skill_key()
                         break
                         
-                    # 如果既没有匹配中的提示，也没有进入战场，可能是出错了
-                    if time.time() - wait_match_time > 10:  # 给10秒的缓冲时间
-                        self.log_signal.emit("匹配状态异常，重新开始...")
+                    # 如果既没有匹配中的提示，也没有进入战场，且已经过了loading时间
+                    if match_success and time.time() - wait_match_time > 30:  # 给30秒的总缓冲时间
+                        self.log_signal.emit("进入战场超时，重新开始...")
                         return
                         
                     time.sleep(1)
                 
                 # 4. 检测战斗结束
                 self.status_signal.emit("战斗中...")
+                battle_start_time = time.time()
                 while self.running:
+                    # 检查战斗是否结束
                     if pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8):
                         self.log_signal.emit("战斗结束，处理结算...")
                         self.release_skill_key()
@@ -172,6 +183,13 @@ class BattleThread(QThread):
                         self.click_position(960, 540)
                         time.sleep(2)
                         break
+                    
+                    # 战斗超时保护（10分钟）
+                    if time.time() - battle_start_time > 600:
+                        self.log_signal.emit("战斗时间过长，可能出现异常，重新开始...")
+                        self.release_skill_key()
+                        return
+                        
                     time.sleep(1)
                     
         except Exception as e:
