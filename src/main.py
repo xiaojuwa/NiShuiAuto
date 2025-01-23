@@ -37,11 +37,10 @@ class BattleThread(QThread):
             'check_interval': 1,
             'exit_key': 'esc',
             'follow_key': 'g',  # 添加跟随键
-            'first_follow_duration': 60,  # 首次进入战场的跟随时间（秒）
+            'first_follow_duration': 30,  # 首次进入战场的跟随时间（秒）
             'follow_duration': 15,  # 复活后的跟随持续时间（秒）
             'tab_interval': 5,  # Tab键按下间隔（秒）
             'loading_wait': 30,  # 进入战场loading等待时间（秒）
-            'follow_check_retry': 3,  # 跟随状态检查重试次数
             'power_key': 'f',  # 激活强力状态的按键
         }
         pyautogui.FAILSAFE = True
@@ -127,13 +126,6 @@ class BattleThread(QThread):
         time.sleep(0.1)
         keyboard.release(self.config['follow_key'])
 
-    def cancel_follow(self):
-        """取消跟随"""
-        logger.debug("按下G键取消跟随")
-        keyboard.press(self.config['follow_key'])
-        time.sleep(0.1)
-        keyboard.release(self.config['follow_key'])
-
     def check_death(self):
         """检查是否死亡"""
         try:
@@ -165,51 +157,6 @@ class BattleThread(QThread):
         time.sleep(0.1)
         keyboard.release('tab')
 
-    def check_follow_status(self):
-        """检查是否处于跟随状态"""
-        try:
-            follow_status = pyautogui.locateOnScreen('assets/follow_status.png', confidence=0.8)
-            logger.debug(f"跟随状态检测结果: {follow_status}")
-            return follow_status is not None
-        except Exception as e:
-            logger.error(f"检测跟随状态时发生错误: {str(e)}")
-            return False
-
-    def ensure_follow_status(self, should_follow=True):
-        """确保跟随状态正确
-        
-        Args:
-            should_follow: True表示应该处于跟随状态，False表示应该不处于跟随状态
-        
-        Returns:
-            bool: 是否成功确保状态正确
-        """
-        retry_count = 0
-        while retry_count < self.config['follow_check_retry']:
-            is_following = self.check_follow_status()
-            
-            if is_following == should_follow:
-                return True
-                
-            logger.debug(f"跟随状态不正确，当前状态: {'跟随中' if is_following else '未跟随'}, 目标状态: {'跟随' if should_follow else '取消跟随'}")
-            if should_follow:
-                self.follow_teammate()
-            else:
-                self.cancel_follow()
-                
-            time.sleep(1)
-            retry_count += 1
-            
-        logger.error(f"无法确保跟随状态正确，已重试{retry_count}次")
-        return False
-
-    def activate_power_state(self):
-        """激活强力状态"""
-        logger.debug("按下F键激活强力状态")
-        keyboard.press(self.config['power_key'])
-        time.sleep(0.1)
-        keyboard.release(self.config['power_key'])
-
     def check_power_state(self):
         """检查是否可以激活强力状态"""
         try:
@@ -222,6 +169,13 @@ class BattleThread(QThread):
         except Exception as e:
             logger.error(f"检测强力状态时发生错误: {str(e)}")
         return False
+
+    def activate_power_state(self):
+        """激活强力状态"""
+        logger.debug("按下F键激活强力状态")
+        keyboard.press(self.config['power_key'])
+        time.sleep(0.1)
+        keyboard.release(self.config['power_key'])
 
     def close_all_windows(self):
         """关闭所有结算界面
@@ -274,12 +228,31 @@ class BattleThread(QThread):
             
         return True
 
+    def check_buy_medicine(self):
+        """检查是否出现购买药品界面"""
+        try:
+            buy_medicine = pyautogui.locateOnScreen('assets/buy_medicine.png', confidence=0.8)
+            logger.debug(f"购买药品界面检测结果: {buy_medicine}")
+            if buy_medicine:
+                self.log_signal.emit("检测到购买药品界面，点击取消...")
+                # 查找取消按钮
+                try:
+                    cancel_button = pyautogui.locateOnScreen('assets/medicine_cancel.png', confidence=0.8)
+                    if cancel_button:
+                        self.click_position(cancel_button.left + cancel_button.width/2,
+                                         cancel_button.top + cancel_button.height/2)
+                        return True
+                except Exception as e:
+                    logger.error(f"查找药品界面取消按钮时发生错误: {str(e)}")
+        except Exception as e:
+            logger.error(f"检测购买药品界面时发生错误: {str(e)}")
+        return False
+
     def battle_cycle(self):
         """单次战斗循环"""
         # 开始跟随
         self.log_signal.emit("开始跟随队友...")
-        if not self.ensure_follow_status(True):
-            self.log_signal.emit("无法确保跟随状态，但继续执行...")
+        self.follow_teammate()
         
         # 第一次进入战场时等待1分钟让队伍集合
         self.log_signal.emit("等待60秒让队伍集合...")
@@ -314,24 +287,20 @@ class BattleThread(QThread):
                 
                 self.log_signal.emit("已复活，重新开始战斗循环...")
                 # 重新开始跟随（复活后只等待15秒）
-                if not self.ensure_follow_status(True):
-                    self.log_signal.emit("无法确保跟随状态，但继续执行...")
+                self.follow_teammate()
                 self.log_signal.emit("等待15秒让队伍集合...")
                 time.sleep(self.config['follow_duration'])
                 self.press_skill_key()
                 last_tab_time = time.time()  # 重置Tab键计时器
-            
-            # 检查跟随状态
-            if not self.check_follow_status():
-                self.log_signal.emit("检测到跟随状态已断开，尝试重新跟随...")
-                if not self.ensure_follow_status(True):
-                    self.log_signal.emit("无法恢复跟随状态，但继续执行...")
             
             # 检查是否需要就位确认
             self.check_ready_button()
             
             # 检查是否可以激活强力状态
             self.check_power_state()
+            
+            # 检查是否出现购买药品界面
+            self.check_buy_medicine()
             
             # 检查战斗是否结束
             try:
