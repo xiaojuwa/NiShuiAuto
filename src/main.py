@@ -11,6 +11,8 @@ import keyboard
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel, 
                            QVBoxLayout, QWidget, QLineEdit, QHBoxLayout)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QIcon
+import os
 
 # 配置日志
 logging.basicConfig(
@@ -34,6 +36,13 @@ class BattleThread(QThread):
             'skill_key': 'f4',  # 默认F4键
             'check_interval': 1,
             'exit_key': 'esc',
+            'follow_key': 'g',  # 添加跟随键
+            'first_follow_duration': 60,  # 首次进入战场的跟随时间（秒）
+            'follow_duration': 15,  # 复活后的跟随持续时间（秒）
+            'tab_interval': 5,  # Tab键按下间隔（秒）
+            'loading_wait': 30,  # 进入战场loading等待时间（秒）
+            'follow_check_retry': 3,  # 跟随状态检查重试次数
+            'power_key': 'f',  # 激活强力状态的按键
         }
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.5
@@ -85,14 +94,6 @@ class BattleThread(QThread):
                     self.stop()
                     break
                 
-                # 定期检查时间（每10分钟检查一次）
-                if self.battle_count % 10 == 0:
-                    is_open, message = self.check_battle_time()
-                    if not is_open:
-                        self.log_signal.emit(message)
-                        self.stop()
-                        break
-                
                 self.main_loop()
                 time.sleep(self.config['check_interval'])
                 
@@ -119,17 +120,289 @@ class BattleThread(QThread):
         """释放技能键"""
         keyboard.release(self.config['skill_key'])
 
+    def follow_teammate(self):
+        """按G键跟随队友"""
+        logger.debug("按下G键开始跟随")
+        keyboard.press(self.config['follow_key'])
+        time.sleep(0.1)
+        keyboard.release(self.config['follow_key'])
+
+    def cancel_follow(self):
+        """取消跟随"""
+        logger.debug("按下G键取消跟随")
+        keyboard.press(self.config['follow_key'])
+        time.sleep(0.1)
+        keyboard.release(self.config['follow_key'])
+
+    def check_death(self):
+        """检查是否死亡"""
+        try:
+            death_icon = pyautogui.locateOnScreen('assets/healing_point.png', confidence=0.8)
+            logger.debug(f"死亡检测结果: {death_icon}")
+            return death_icon is not None
+        except Exception as e:
+            logger.error(f"检测死亡状态时发生错误: {str(e)}")
+            return False
+
+    def check_ready_button(self):
+        """检查是否出现就位确认按钮"""
+        try:
+            ready_button = pyautogui.locateOnScreen('assets/ready_button.png', confidence=0.8)
+            logger.debug(f"就位按钮检测结果: {ready_button}")
+            if ready_button:
+                self.log_signal.emit("检测到就位按钮，自动确认...")
+                self.click_position(ready_button.left + ready_button.width/2,
+                                 ready_button.top + ready_button.height/2)
+                return True
+        except Exception as e:
+            logger.error(f"检测就位按钮时发生错误: {str(e)}")
+        return False
+
+    def switch_target(self):
+        """切换目标"""
+        logger.debug("按下Tab键切换目标")
+        keyboard.press('tab')
+        time.sleep(0.1)
+        keyboard.release('tab')
+
+    def check_follow_status(self):
+        """检查是否处于跟随状态"""
+        try:
+            follow_status = pyautogui.locateOnScreen('assets/follow_status.png', confidence=0.8)
+            logger.debug(f"跟随状态检测结果: {follow_status}")
+            return follow_status is not None
+        except Exception as e:
+            logger.error(f"检测跟随状态时发生错误: {str(e)}")
+            return False
+
+    def ensure_follow_status(self, should_follow=True):
+        """确保跟随状态正确
+        
+        Args:
+            should_follow: True表示应该处于跟随状态，False表示应该不处于跟随状态
+        
+        Returns:
+            bool: 是否成功确保状态正确
+        """
+        retry_count = 0
+        while retry_count < self.config['follow_check_retry']:
+            is_following = self.check_follow_status()
+            
+            if is_following == should_follow:
+                return True
+                
+            logger.debug(f"跟随状态不正确，当前状态: {'跟随中' if is_following else '未跟随'}, 目标状态: {'跟随' if should_follow else '取消跟随'}")
+            if should_follow:
+                self.follow_teammate()
+            else:
+                self.cancel_follow()
+                
+            time.sleep(1)
+            retry_count += 1
+            
+        logger.error(f"无法确保跟随状态正确，已重试{retry_count}次")
+        return False
+
+    def activate_power_state(self):
+        """激活强力状态"""
+        logger.debug("按下F键激活强力状态")
+        keyboard.press(self.config['power_key'])
+        time.sleep(0.1)
+        keyboard.release(self.config['power_key'])
+
+    def check_power_state(self):
+        """检查是否可以激活强力状态"""
+        try:
+            power_icon = pyautogui.locateOnScreen('assets/power_state.png', confidence=0.8)
+            logger.debug(f"强力状态检测结果: {power_icon}")
+            if power_icon:
+                self.log_signal.emit("检测到可激活强力状态，正在激活...")
+                self.activate_power_state()
+                return True
+        except Exception as e:
+            logger.error(f"检测强力状态时发生错误: {str(e)}")
+        return False
+
+    def close_all_windows(self):
+        """关闭所有结算界面
+        
+        Returns:
+            bool: 是否成功关闭所有界面
+        """
+        retry_count = 0
+        max_retries = 5  # 最大重试次数
+        
+        while retry_count < max_retries:
+            try:
+                # 查找所有关闭按钮
+                close_buttons = list(pyautogui.locateAllOnScreen('assets/close_button.png', confidence=0.8))
+                logger.debug(f"找到 {len(close_buttons)} 个关闭按钮")
+                
+                if not close_buttons:  # 如果没有找到任何关闭按钮
+                    if retry_count > 0:  # 如果不是第一次检查，说明之前的按钮都已经关闭
+                        logger.debug("没有找到更多关闭按钮，认为已全部关闭")
+                        return True
+                    else:  # 如果是第一次检查就没找到，可能是图片识别问题
+                        logger.debug("未找到任何关闭按钮，等待后重试")
+                        time.sleep(1)
+                        retry_count += 1
+                        continue
+                
+                # 点击所有找到的关闭按钮
+                for button in close_buttons:
+                    self.log_signal.emit(f"正在关闭结算界面 ({close_buttons.index(button) + 1}/{len(close_buttons)})...")
+                    self.click_position(button.left + button.width/2,
+                                     button.top + button.height/2)
+                    time.sleep(0.5)  # 等待动画效果
+                
+                time.sleep(1)  # 等待界面完全关闭
+                retry_count += 1
+                
+            except Exception as e:
+                logger.error(f"关闭结算界面时发生错误: {str(e)}")
+                return False
+        
+        # 最后再检查一次是否还有未关闭的界面
+        try:
+            remaining_buttons = list(pyautogui.locateAllOnScreen('assets/close_button.png', confidence=0.8))
+            if remaining_buttons:
+                logger.error(f"仍有 {len(remaining_buttons)} 个界面未能关闭")
+                return False
+        except Exception as e:
+            logger.error(f"最终检查时发生错误: {str(e)}")
+            return False
+            
+        return True
+
+    def battle_cycle(self):
+        """单次战斗循环"""
+        # 开始跟随
+        self.log_signal.emit("开始跟随队友...")
+        if not self.ensure_follow_status(True):
+            self.log_signal.emit("无法确保跟随状态，但继续执行...")
+        
+        # 第一次进入战场时等待1分钟让队伍集合
+        self.log_signal.emit("等待60秒让队伍集合...")
+        time.sleep(self.config['first_follow_duration'])
+        
+        # 开始战斗（保持跟随状态）
+        self.log_signal.emit("开始战斗...")
+        self.press_skill_key()
+        
+        battle_end_detected = False  # 用于标记是否检测到战斗结束
+        last_tab_time = time.time()  # 记录上次按Tab键的时间
+        
+        while self.running:
+            current_time = time.time()
+            
+            # 检查是否需要切换目标
+            if current_time - last_tab_time >= self.config['tab_interval']:
+                self.switch_target()
+                last_tab_time = current_time
+            
+            # 检查是否死亡
+            if self.check_death():
+                self.log_signal.emit("检测到死亡状态，等待复活...")
+                self.release_skill_key()
+                
+                # 等待复活
+                while self.running and self.check_death():
+                    time.sleep(1)
+                
+                if not self.running:
+                    return
+                
+                self.log_signal.emit("已复活，重新开始战斗循环...")
+                # 重新开始跟随（复活后只等待15秒）
+                if not self.ensure_follow_status(True):
+                    self.log_signal.emit("无法确保跟随状态，但继续执行...")
+                self.log_signal.emit("等待15秒让队伍集合...")
+                time.sleep(self.config['follow_duration'])
+                self.press_skill_key()
+                last_tab_time = time.time()  # 重置Tab键计时器
+            
+            # 检查跟随状态
+            if not self.check_follow_status():
+                self.log_signal.emit("检测到跟随状态已断开，尝试重新跟随...")
+                if not self.ensure_follow_status(True):
+                    self.log_signal.emit("无法恢复跟随状态，但继续执行...")
+            
+            # 检查是否需要就位确认
+            self.check_ready_button()
+            
+            # 检查是否可以激活强力状态
+            self.check_power_state()
+            
+            # 检查战斗是否结束
+            try:
+                battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8)
+                in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
+                if not in_battle:
+                    in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
+                
+                # 检测到战斗结束图标
+                if battle_end and not battle_end_detected:
+                    self.log_signal.emit("检测到战斗结束，等待退出战场...")
+                    battle_end_detected = True
+                    self.release_skill_key()
+                
+                # 如果已经检测到战斗结束，且已经退出战场（in_battle图标消失）
+                if battle_end_detected and not in_battle:
+                    self.log_signal.emit("已退出战场，处理结算...")
+                    self.battle_count += 1
+                    self.status_signal.emit(f"已完成 {self.battle_count} 场战斗")
+                    
+                    # 等待3秒确保结算界面完全加载
+                    time.sleep(3)
+                    
+                    # 关闭所有结算界面
+                    if not self.close_all_windows():
+                        self.log_signal.emit("无法完全关闭结算界面，重试中...")
+                        return
+                    
+                    # 等待2秒确保界面完全关闭
+                    time.sleep(2)
+                    
+                    # 检查时间
+                    is_open, message = self.check_battle_time()
+                    if not is_open:
+                        self.log_signal.emit(message)
+                        self.stop()
+                    else:
+                        self.log_signal.emit(message)
+                    
+                    return
+                    
+            except Exception as e:
+                logger.error(f"检查战斗状态时发生错误: {str(e)}")
+            
+            time.sleep(1)
+
     def main_loop(self):
         """主循环逻辑"""
         try:
-            # 1. 查找战场图标
+            # 首先检查是否已在战场中
+            try:
+                in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
+                if not in_battle:
+                    in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
+                
+                # 如果已在战场中，直接进入战斗循环
+                if in_battle:
+                    self.log_signal.emit("检测到已在战场中，开始战斗循环...")
+                    logger.debug("检测到已在战场状态，直接开始战斗循环")
+                    self.battle_cycle()
+                    return
+            except Exception as e:
+                logger.error(f"检查初始战场状态时发生错误: {str(e)}")
+
+            # 如果不在战场中，执行正常的进入战场流程
             self.status_signal.emit("寻找战场图标...")
             logger.debug("开始查找战场图标...")
             try:
                 battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.8)
                 logger.debug(f"战场图标查找结果: {battle_icon}, 置信度: 0.8")
                 if not battle_icon:
-                    # 如果没找到，尝试降低置信度再试一次
                     battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.6)
                     logger.debug(f"降低置信度后战场图标查找结果: {battle_icon}, 置信度: 0.6")
             except Exception as e:
@@ -138,7 +411,7 @@ class BattleThread(QThread):
             
             if battle_icon:
                 self.log_signal.emit("找到战场图标，点击进入...")
-                logger.debug(f"战场图标位置: x={battle_icon.left}, y={battle_icon.top}, width={battle_icon.width}, height={battle_icon.height}")
+                logger.debug(f"战场图标位置: x={battle_icon.left}, y={battle_icon.top}")
                 self.click_position(battle_icon.left + battle_icon.width/2, 
                                  battle_icon.top + battle_icon.height/2)
                 time.sleep(2)
@@ -147,7 +420,7 @@ class BattleThread(QThread):
                 self.status_signal.emit("查找单人匹配按钮...")
                 try:
                     match_button = pyautogui.locateOnScreen('assets/match_button.png', confidence=0.8)
-                    logger.debug(f"匹配按钮查找结果: {match_button}, 置信度: 0.8")
+                    logger.debug(f"匹配按钮查找结果: {match_button}")
                 except Exception as e:
                     logger.error(f"查找匹配按钮时发生错误: {str(e)}")
                     match_button = None
@@ -168,118 +441,60 @@ class BattleThread(QThread):
                 match_success = False
                 
                 while self.running:
-                    # 检查是否在匹配中
                     try:
                         matching_icon = pyautogui.locateOnScreen('assets/matching.png', confidence=0.8)
-                        logger.debug(f"匹配中图标查找结果: {matching_icon}, 置信度: 0.8")
+                        logger.debug(f"匹配中图标查找结果: {matching_icon}")
                     except Exception as e:
                         logger.error(f"查找匹配中图标时发生错误: {str(e)}")
                         matching_icon = None
                     
                     if matching_icon:
                         current_wait_time = time.time() - wait_match_time
-                        logger.debug(f"当前已等待匹配时间: {current_wait_time:.1f}秒")
                         if current_wait_time > 300:  # 5分钟超时
                             self.log_signal.emit("匹配超时，重新开始...")
-                            # 点击取消匹配按钮
+                            logger.debug(f"匹配超时，已等待: {current_wait_time:.1f}秒")
                             try:
                                 cancel_button = pyautogui.locateOnScreen('assets/cancel_match.png', confidence=0.8)
-                                logger.debug(f"取消匹配按钮查找结果: {cancel_button}")
+                                if cancel_button:
+                                    self.click_position(cancel_button.left + cancel_button.width/2,
+                                                     cancel_button.top + cancel_button.height/2)
                             except Exception as e:
-                                logger.error(f"查找取消匹配按钮时发生错误: {str(e)}")
-                                cancel_button = None
-                            if cancel_button:
-                                self.click_position(cancel_button.left + cancel_button.width/2,
-                                                 cancel_button.top + cancel_button.height/2)
+                                logger.error(f"取消匹配时发生错误: {str(e)}")
                             time.sleep(2)
                             return
                         time.sleep(1)
                         continue
-                        
-                    # 如果匹配界面消失，说明可能进入了loading状态
+                    
                     if not match_success:
                         self.log_signal.emit("匹配成功，等待进入战场...")
                         logger.debug("检测到匹配界面消失，进入loading等待状态")
                         match_success = True
-                        logger.debug("等待15秒让loading完成...")
-                        time.sleep(15)  # 等待15秒让loading完成
+                        time.sleep(self.config['loading_wait'])  # 等待loading
                         logger.debug("loading等待完成，开始检查战场状态")
-                        
-                    # 检查是否已进入战场（尝试多个特征图片）
-                    try:
-                        logger.debug("尝试识别战场内状态...")
-                        in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
-                        logger.debug(f"主要战场特征识别结果: {in_battle}, 置信度: 0.8")
-                        if not in_battle:
-                            # 如果没找到，尝试降低置信度
-                            in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
-                            logger.debug(f"降低置信度后主要战场特征识别结果: {in_battle}, 置信度: 0.6")
-                    except Exception as e:
-                        logger.error(f"识别主要战场特征时发生错误: {str(e)}")
-                        in_battle = None
-
-                    try:
-                        in_battle_alt = pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.8)
-                        logger.debug(f"备用战场特征识别结果: {in_battle_alt}, 置信度: 0.8")
-                        if not in_battle_alt:
-                            # 如果没找到，尝试降低置信度
-                            in_battle_alt = pyautogui.locateOnScreen('assets/in_battle_alt.png', confidence=0.6)
-                            logger.debug(f"降低置信度后备用战场特征识别结果: {in_battle_alt}, 置信度: 0.6")
-                    except Exception as e:
-                        logger.error(f"识别备用战场特征时发生错误: {str(e)}")
-                        in_battle_alt = None
                     
-                    if in_battle or in_battle_alt:
-                        self.log_signal.emit("已进入战场，开始自动战斗...")
-                        logger.debug("成功识别到战场状态，开始战斗")
-                        self.press_skill_key()
+                    # 检查是否已进入战场
+                    try:
+                        in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
+                        if not in_battle:
+                            in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
+                    except Exception as e:
+                        logger.error(f"检查战场状态时发生错误: {str(e)}")
+                        in_battle = None
+                    
+                    if in_battle:
+                        self.log_signal.emit("已进入战场，开始战斗循环...")
+                        logger.debug("成功识别到战场状态，开始战斗循环")
+                        self.battle_cycle()  # 使用新的战斗循环
                         break
-                        
-                    # 如果既没有匹配中的提示，也没有进入战场，且已经过了loading时间
+                    
                     current_total_time = time.time() - wait_match_time
-                    if match_success and current_total_time > 30:  # 给30秒的总缓冲时间
+                    if match_success and current_total_time > 60:  # 给60秒的总缓冲时间
                         self.log_signal.emit("进入战场超时，重新开始...")
-                        logger.debug(f"进入战场超时，已等待总时间: {current_total_time:.1f}秒")
+                        logger.debug(f"进入战场超时，已等待: {current_total_time:.1f}秒")
                         return
-                        
+                    
                     time.sleep(1)
                 
-                # 4. 检测战斗结束
-                self.status_signal.emit("战斗中...")
-                battle_start_time = time.time()
-                while self.running:
-                    # 检查战斗是否结束
-                    try:
-                        battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8)
-                        logger.debug(f"战斗结束检测结果: {battle_end}, 置信度: 0.8")
-                        if not battle_end:
-                            battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.6)
-                            logger.debug(f"降低置信度后战斗结束检测结果: {battle_end}, 置信度: 0.6")
-                    except Exception as e:
-                        logger.error(f"检测战斗结束时发生错误: {str(e)}")
-                        battle_end = None
-                    
-                    if battle_end:
-                        self.log_signal.emit("战斗结束，处理结算...")
-                        logger.debug("检测到战斗结束，准备处理结算")
-                        self.release_skill_key()
-                        self.battle_count += 1
-                        self.status_signal.emit(f"已完成 {self.battle_count} 场战斗")
-                        # 点击关闭结算界面
-                        self.click_position(960, 540)
-                        time.sleep(2)
-                        break
-                    
-                    # 战斗超时保护（10分钟）
-                    current_battle_time = time.time() - battle_start_time
-                    if current_battle_time > 600:
-                        self.log_signal.emit("战斗时间过长，可能出现异常，重新开始...")
-                        logger.debug(f"战斗超时，已进行时间: {current_battle_time:.1f}秒")
-                        self.release_skill_key()
-                        return
-                        
-                    time.sleep(1)
-                    
         except Exception as e:
             logger.exception("执行过程中发生异常")
             self.log_signal.emit(f"执行过程中出错: {str(e)}")
@@ -313,6 +528,12 @@ class MainWindow(QMainWindow):
             'SPACE': 'space', 'TAB': 'tab', 'SHIFT': 'shift',
             'CTRL': 'ctrl', 'ALT': 'alt'
         }
+        
+        # 设置窗口图标
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            
         self.initUI()
         
     def initUI(self):
