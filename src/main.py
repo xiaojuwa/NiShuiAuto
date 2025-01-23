@@ -42,11 +42,66 @@ class BattleThread(QThread):
             'tab_interval': 5,  # Tab键按下间隔（秒）
             'loading_wait': 30,  # 进入战场loading等待时间（秒）
             'power_key': 'f',  # 激活强力状态的按键
+            # 为不同类型的图片设置不同的置信度要求
+            'confidence_levels': {
+                'battle_icon': [0.8, 0.7],      # 战场图标识别
+                'in_battle': [0.9, 0.8, 0.7],   # 战场内状态识别
+                'match_button': [0.8, 0.7],     # 匹配按钮识别
+                'matching': [0.8, 0.7],         # 匹配中状态识别
+                'others': [0.8, 0.7]            # 其他图片识别
+            }
         }
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.5
         self.battle_count = 0
         logger.debug("BattleThread初始化完成")
+
+    def find_image(self, image_path, image_type='others', custom_confidence_levels=None):
+        """查找图片，根据图片类型使用不同的置信度
+        
+        Args:
+            image_path: 图片路径
+            image_type: 图片类型，用于选择对应的置信度列表
+            custom_confidence_levels: 自定义置信度列表，优先级高于预设值
+            
+        Returns:
+            找到的图片位置，如果未找到返回None
+        """
+        confidence_levels = custom_confidence_levels if custom_confidence_levels else \
+                          self.config['confidence_levels'].get(image_type, self.config['confidence_levels']['others'])
+            
+        for confidence in confidence_levels:
+            try:
+                result = pyautogui.locateOnScreen(image_path, confidence=confidence)
+                if result:
+                    logger.debug(f"找到图片 {image_path}，置信度: {confidence}")
+                    return result
+            except Exception as e:
+                logger.error(f"查找图片 {image_path} 时发生错误: {str(e)}")
+        return None
+
+    def find_all_images(self, image_path, confidence_levels=None):
+        """查找所有匹配的图片，尝试多个置信度
+        
+        Args:
+            image_path: 图片路径
+            confidence_levels: 置信度列表，如果为None则使用默认配置
+            
+        Returns:
+            找到的所有图片位置列表
+        """
+        if confidence_levels is None:
+            confidence_levels = self.config['confidence_levels']
+            
+        for confidence in confidence_levels:
+            try:
+                results = list(pyautogui.locateAllOnScreen(image_path, confidence=confidence))
+                if results:
+                    logger.debug(f"找到 {len(results)} 个图片 {image_path}，置信度: {confidence}")
+                    return results
+            except Exception as e:
+                logger.error(f"查找图片 {image_path} 时发生错误: {str(e)}")
+        return []
 
     def check_battle_time(self):
         """检查当前是否在战场开放时间内"""
@@ -129,7 +184,7 @@ class BattleThread(QThread):
     def check_death(self):
         """检查是否死亡"""
         try:
-            death_icon = pyautogui.locateOnScreen('assets/healing_point.png', confidence=0.8)
+            death_icon = self.find_image('assets/healing_point.png')
             logger.debug(f"死亡检测结果: {death_icon}")
             return death_icon is not None
         except Exception as e:
@@ -139,7 +194,7 @@ class BattleThread(QThread):
     def check_ready_button(self):
         """检查是否出现就位确认按钮"""
         try:
-            ready_button = pyautogui.locateOnScreen('assets/ready_button.png', confidence=0.8)
+            ready_button = self.find_image('assets/ready_button.png')
             logger.debug(f"就位按钮检测结果: {ready_button}")
             if ready_button:
                 self.log_signal.emit("检测到就位按钮，自动确认...")
@@ -160,7 +215,7 @@ class BattleThread(QThread):
     def check_power_state(self):
         """检查是否可以激活强力状态"""
         try:
-            power_icon = pyautogui.locateOnScreen('assets/power_state.png', confidence=0.8)
+            power_icon = self.find_image('assets/power_state.png')
             logger.debug(f"强力状态检测结果: {power_icon}")
             if power_icon:
                 self.log_signal.emit("检测到可激活强力状态，正在激活...")
@@ -189,7 +244,7 @@ class BattleThread(QThread):
         while retry_count < max_retries:
             try:
                 # 查找所有关闭按钮
-                close_buttons = list(pyautogui.locateAllOnScreen('assets/close_button.png', confidence=0.8))
+                close_buttons = self.find_all_images('assets/close_button.png')
                 logger.debug(f"找到 {len(close_buttons)} 个关闭按钮")
                 
                 if not close_buttons:  # 如果没有找到任何关闭按钮
@@ -218,7 +273,7 @@ class BattleThread(QThread):
         
         # 最后再检查一次是否还有未关闭的界面
         try:
-            remaining_buttons = list(pyautogui.locateAllOnScreen('assets/close_button.png', confidence=0.8))
+            remaining_buttons = self.find_all_images('assets/close_button.png')
             if remaining_buttons:
                 logger.error(f"仍有 {len(remaining_buttons)} 个界面未能关闭")
                 return False
@@ -231,13 +286,13 @@ class BattleThread(QThread):
     def check_buy_medicine(self):
         """检查是否出现购买药品界面"""
         try:
-            buy_medicine = pyautogui.locateOnScreen('assets/buy_medicine.png', confidence=0.8)
+            buy_medicine = self.find_image('assets/buy_medicine.png')
             logger.debug(f"购买药品界面检测结果: {buy_medicine}")
             if buy_medicine:
                 self.log_signal.emit("检测到购买药品界面，点击取消...")
                 # 查找取消按钮
                 try:
-                    cancel_button = pyautogui.locateOnScreen('assets/medicine_cancel.png', confidence=0.8)
+                    cancel_button = self.find_image('assets/medicine_cancel.png')
                     if cancel_button:
                         self.click_position(cancel_button.left + cancel_button.width/2,
                                          cancel_button.top + cancel_button.height/2)
@@ -304,10 +359,10 @@ class BattleThread(QThread):
             
             # 检查战斗是否结束
             try:
-                battle_end = pyautogui.locateOnScreen('assets/battle_end.png', confidence=0.8)
-                in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
+                battle_end = self.find_image('assets/battle_end.png')
+                in_battle = self.find_image('assets/in_battle.png')
                 if not in_battle:
-                    in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
+                    in_battle = self.find_image('assets/in_battle.png', confidence=0.6)
                 
                 # 检测到战斗结束图标
                 if battle_end and not battle_end_detected:
@@ -351,32 +406,20 @@ class BattleThread(QThread):
         """主循环逻辑"""
         try:
             # 首先检查是否已在战场中
-            try:
-                in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
-                if not in_battle:
-                    in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
-                
-                # 如果已在战场中，直接进入战斗循环
-                if in_battle:
-                    self.log_signal.emit("检测到已在战场中，开始战斗循环...")
-                    logger.debug("检测到已在战场状态，直接开始战斗循环")
-                    self.battle_cycle()
-                    return
-            except Exception as e:
-                logger.error(f"检查初始战场状态时发生错误: {str(e)}")
+            in_battle = self.find_image('assets/in_battle.png', 'in_battle')
+            
+            # 如果已在战场中，直接进入战斗循环
+            if in_battle:
+                self.log_signal.emit("检测到已在战场中，开始战斗循环...")
+                logger.debug("检测到已在战场状态，直接开始战斗循环")
+                self.battle_cycle()
+                return
 
             # 如果不在战场中，执行正常的进入战场流程
             self.status_signal.emit("寻找战场图标...")
             logger.debug("开始查找战场图标...")
-            try:
-                battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.8)
-                logger.debug(f"战场图标查找结果: {battle_icon}, 置信度: 0.8")
-                if not battle_icon:
-                    battle_icon = pyautogui.locateOnScreen('assets/battle_icon.png', confidence=0.6)
-                    logger.debug(f"降低置信度后战场图标查找结果: {battle_icon}, 置信度: 0.6")
-            except Exception as e:
-                logger.error(f"查找战场图标时发生错误: {str(e)}")
-                battle_icon = None
+            
+            battle_icon = self.find_image('assets/battle_icon.png', 'battle_icon')
             
             if battle_icon:
                 self.log_signal.emit("找到战场图标，点击进入...")
@@ -387,12 +430,7 @@ class BattleThread(QThread):
                 
                 # 2. 查找并点击单人匹配按钮
                 self.status_signal.emit("查找单人匹配按钮...")
-                try:
-                    match_button = pyautogui.locateOnScreen('assets/match_button.png', confidence=0.8)
-                    logger.debug(f"匹配按钮查找结果: {match_button}")
-                except Exception as e:
-                    logger.error(f"查找匹配按钮时发生错误: {str(e)}")
-                    match_button = None
+                match_button = self.find_image('assets/match_button.png', 'match_button')
                 
                 if match_button:
                     self.log_signal.emit("找到单人匹配按钮，开始匹配...")
@@ -410,25 +448,18 @@ class BattleThread(QThread):
                 match_success = False
                 
                 while self.running:
-                    try:
-                        matching_icon = pyautogui.locateOnScreen('assets/matching.png', confidence=0.8)
-                        logger.debug(f"匹配中图标查找结果: {matching_icon}")
-                    except Exception as e:
-                        logger.error(f"查找匹配中图标时发生错误: {str(e)}")
-                        matching_icon = None
+                    matching_icon = self.find_image('assets/matching.png', 'matching')
+                    logger.debug(f"匹配中图标查找结果: {matching_icon}")
                     
                     if matching_icon:
                         current_wait_time = time.time() - wait_match_time
                         if current_wait_time > 300:  # 5分钟超时
                             self.log_signal.emit("匹配超时，重新开始...")
                             logger.debug(f"匹配超时，已等待: {current_wait_time:.1f}秒")
-                            try:
-                                cancel_button = pyautogui.locateOnScreen('assets/cancel_match.png', confidence=0.8)
-                                if cancel_button:
-                                    self.click_position(cancel_button.left + cancel_button.width/2,
-                                                     cancel_button.top + cancel_button.height/2)
-                            except Exception as e:
-                                logger.error(f"取消匹配时发生错误: {str(e)}")
+                            cancel_button = self.find_image('assets/cancel_match.png')
+                            if cancel_button:
+                                self.click_position(cancel_button.left + cancel_button.width/2,
+                                                 cancel_button.top + cancel_button.height/2)
                             time.sleep(2)
                             return
                         time.sleep(1)
@@ -442,13 +473,7 @@ class BattleThread(QThread):
                         logger.debug("loading等待完成，开始检查战场状态")
                     
                     # 检查是否已进入战场
-                    try:
-                        in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.8)
-                        if not in_battle:
-                            in_battle = pyautogui.locateOnScreen('assets/in_battle.png', confidence=0.6)
-                    except Exception as e:
-                        logger.error(f"检查战场状态时发生错误: {str(e)}")
-                        in_battle = None
+                    in_battle = self.find_image('assets/in_battle.png', 'in_battle')
                     
                     if in_battle:
                         self.log_signal.emit("已进入战场，开始战斗循环...")
