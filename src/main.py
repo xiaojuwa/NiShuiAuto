@@ -57,10 +57,10 @@ class BattleThread(QThread):
         logger.debug("BattleThread初始化完成")
 
     def find_image(self, image_path, image_type='others', custom_confidence_levels=None):
-        """查找图片，根据图片类型使用不同的置信度
+        """查找图片，根据图片类型使用不同的置信度。支持多个图片路径。
         
         Args:
-            image_path: 图片路径
+            image_path: 图片路径或图片路径列表
             image_type: 图片类型，用于选择对应的置信度列表
             custom_confidence_levels: 自定义置信度列表，优先级高于预设值
             
@@ -69,39 +69,56 @@ class BattleThread(QThread):
         """
         confidence_levels = custom_confidence_levels if custom_confidence_levels else \
                           self.config['confidence_levels'].get(image_type, self.config['confidence_levels']['others'])
-            
-        for confidence in confidence_levels:
-            try:
-                result = pyautogui.locateOnScreen(image_path, confidence=confidence)
-                if result:
-                    logger.debug(f"找到图片 {image_path}，置信度: {confidence}")
-                    return result
-            except Exception as e:
-                logger.error(f"查找图片 {image_path} 时发生错误: {str(e)}")
+        
+        # 如果是单个图片路径，转换为列表
+        if isinstance(image_path, str):
+            image_paths = [image_path]
+        else:
+            image_paths = image_path
+        
+        # 对每个图片路径尝试查找
+        for path in image_paths:
+            for confidence in confidence_levels:
+                try:
+                    result = pyautogui.locateOnScreen(path, confidence=confidence)
+                    if result:
+                        logger.debug(f"找到图片 {path}，置信度: {confidence}")
+                        return result
+                except Exception as e:
+                    logger.error(f"查找图片 {path} 时发生错误: {str(e)}")
         return None
 
     def find_all_images(self, image_path, confidence_levels=None):
-        """查找所有匹配的图片，尝试多个置信度
+        """查找所有匹配的图片，支持多个图片路径
         
         Args:
-            image_path: 图片路径
+            image_path: 图片路径或图片路径列表
             confidence_levels: 置信度列表，如果为None则使用默认配置
             
         Returns:
             找到的所有图片位置列表
         """
         if confidence_levels is None:
-            confidence_levels = self.config['confidence_levels']
-            
-        for confidence in confidence_levels:
-            try:
-                results = list(pyautogui.locateAllOnScreen(image_path, confidence=confidence))
-                if results:
-                    logger.debug(f"找到 {len(results)} 个图片 {image_path}，置信度: {confidence}")
-                    return results
-            except Exception as e:
-                logger.error(f"查找图片 {image_path} 时发生错误: {str(e)}")
-        return []
+            confidence_levels = self.config['confidence_levels']['others']
+        
+        # 如果是单个图片路径，转换为列表
+        if isinstance(image_path, str):
+            image_paths = [image_path]
+        else:
+            image_paths = image_path
+        
+        all_results = []
+        for path in image_paths:
+            for confidence in confidence_levels:
+                try:
+                    results = list(pyautogui.locateAllOnScreen(path, confidence=confidence))
+                    if results:
+                        logger.debug(f"找到 {len(results)} 个图片 {path}，置信度: {confidence}")
+                        all_results.extend(results)
+                except Exception as e:
+                    logger.error(f"查找图片 {path} 时发生错误: {str(e)}")
+        
+        return all_results
 
     def check_battle_time(self):
         """检查当前是否在战场开放时间内"""
@@ -359,10 +376,8 @@ class BattleThread(QThread):
             
             # 检查战斗是否结束
             try:
-                battle_end = self.find_image('assets/battle_end.png')
-                in_battle = self.find_image('assets/in_battle.png')
-                if not in_battle:
-                    in_battle = self.find_image('assets/in_battle.png', confidence=0.6)
+                battle_end = self.find_image('assets/battle_end.png', 'others')
+                in_battle = self.find_image(['assets/in_battle.png', 'assets/in_battle2.png'], 'in_battle')
                 
                 # 检测到战斗结束图标
                 if battle_end and not battle_end_detected:
@@ -406,7 +421,7 @@ class BattleThread(QThread):
         """主循环逻辑"""
         try:
             # 首先检查是否已在战场中
-            in_battle = self.find_image('assets/in_battle.png', 'in_battle')
+            in_battle = self.find_image(['assets/in_battle.png', 'assets/in_battle2.png'], 'in_battle')
             
             # 如果已在战场中，直接进入战斗循环
             if in_battle:
@@ -456,7 +471,7 @@ class BattleThread(QThread):
                         if current_wait_time > 300:  # 5分钟超时
                             self.log_signal.emit("匹配超时，重新开始...")
                             logger.debug(f"匹配超时，已等待: {current_wait_time:.1f}秒")
-                            cancel_button = self.find_image('assets/cancel_match.png')
+                            cancel_button = self.find_image('assets/cancel_match.png', 'others')
                             if cancel_button:
                                 self.click_position(cancel_button.left + cancel_button.width/2,
                                                  cancel_button.top + cancel_button.height/2)
@@ -472,17 +487,27 @@ class BattleThread(QThread):
                         time.sleep(self.config['loading_wait'])  # 等待loading
                         logger.debug("loading等待完成，开始检查战场状态")
                     
-                    # 检查是否已进入战场
-                    in_battle = self.find_image('assets/in_battle.png', 'in_battle')
+                    # 检查是否已进入战场，增加重试逻辑
+                    retry_count = 0
+                    max_retries = 10  # 最大重试次数
+                    retry_interval = 5  # 重试间隔（秒）
                     
-                    if in_battle:
-                        self.log_signal.emit("已进入战场，开始战斗循环...")
-                        logger.debug("成功识别到战场状态，开始战斗循环")
-                        self.battle_cycle()  # 使用新的战斗循环
-                        break
+                    while retry_count < max_retries and self.running:
+                        in_battle = self.find_image(['assets/in_battle.png', 'assets/in_battle2.png'], 'in_battle')
+                        
+                        if in_battle:
+                            self.log_signal.emit("已进入战场，开始战斗循环...")
+                            logger.debug("成功识别到战场状态，开始战斗循环")
+                            self.battle_cycle()  # 使用新的战斗循环
+                            return
+                        
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            logger.debug(f"第 {retry_count} 次检测战场状态失败，{retry_interval}秒后重试...")
+                            time.sleep(retry_interval)
                     
                     current_total_time = time.time() - wait_match_time
-                    if match_success and current_total_time > 60:  # 给60秒的总缓冲时间
+                    if match_success and current_total_time > 60:  # 增加总等待时间到60秒
                         self.log_signal.emit("进入战场超时，重新开始...")
                         logger.debug(f"进入战场超时，已等待: {current_total_time:.1f}秒")
                         return
